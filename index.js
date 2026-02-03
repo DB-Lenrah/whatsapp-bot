@@ -12,7 +12,7 @@ const mongoose = require('mongoose'); // إضافة مكتبة المونجو
 
 // --- إعداد الاتصال بـ MongoDB ---
 // استبدل كلمة PASSWORD بكلمة السر الحقيقية الخاصة بك
-const mongoURI = "mongodb+srv://mostafaabdalabsetmohammed_db_user:<mstfbdlbaset>@db-lenrah-database.0hng1tu.mongodb.net/?appName=DB-Lenrah-Database";
+const mongoURI = "mongodb+srv://mostafaabdalabsetmohammed_db_user:mstfbdlbaset@db-lenrah-database.0hng1tu.mongodb.net/?appName=DB-Lenrah-Database";
 
 mongoose.connect(mongoURI).then(() => {
     console.log('✅ تم الاتصال بقاعدة البيانات السحابية بنجاح!');
