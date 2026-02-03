@@ -8,6 +8,26 @@ const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const pino = require('pino');
+const mongoose = require('mongoose'); // إضافة مكتبة المونجو
+
+// --- إعداد الاتصال بـ MongoDB ---
+// استبدل كلمة PASSWORD بكلمة السر الحقيقية الخاصة بك
+const mongoURI = "mongodb+srv://mostafaabdalabsetmohammed_db_user:<mstfbdlbaset>@db-lenrah-database.0hng1tu.mongodb.net/?appName=DB-Lenrah-Database";
+
+mongoose.connect(mongoURI).then(() => {
+    console.log('✅ تم الاتصال بقاعدة البيانات السحابية بنجاح!');
+}).catch(err => console.error('❌ خطأ في الاتصال بـ MongoDB:', err));
+
+// تعريف الهيكل (Schema) بنفس بياناتك بالظبط
+const UserSchema = new mongoose.Schema({
+    id: { type: String, unique: true },
+    points: { type: Number, default: 0 },
+    greeted: { type: Boolean, default: false },
+    name: { type: String, default: "مستخدم" },
+    joinedGroups: { type: Array, default: [] },
+    lastGroupRequested: { type: String, default: null }
+});
+const User = mongoose.model('User', UserSchema);
 
 // بيانات الجروبات الأصلية الخاصة بك
 const groupInfo = {
@@ -22,15 +42,6 @@ const groupInfo = {
 };
 
 const cooldowns = new Map();
-
-function loadData() {
-    if (!fs.existsSync('database.json')) return {};
-    return JSON.parse(fs.readFileSync('database.json'));
-}
-
-function saveData(data) {
-    fs.writeFileSync('database.json', JSON.stringify(data, null, 4));
-}
 
 function getRankInfo(points) {
     if (points >= 6301) return { name: "Grand Master 🌟", next: "القمة", req: 6301 };
@@ -58,11 +69,11 @@ async function startBot() {
     // --- نظام منع الدخول الخارجي (Gatekeeper) ---
     sock.ev.on('group-participants.update', async (anu) => {
         if (anu.action === 'add') {
-            const db = loadData();
             for (const user of anu.participants) {
                 // تعديل تقني لضمان قراءة معرف المستخدم بشكل صحيح وتجنب خطأ split
                 const userId = typeof user === 'string' ? user : (user.id || user);
-                const isAuthorized = db[userId] && db[userId].lastGroupRequested;
+                const userData = await User.findOne({ id: userId });
+                const isAuthorized = userData && userData.lastGroupRequested;
                 
                 if (!isAuthorized) {
                     await sock.sendMessage(anu.id, { text: `⚠️ عذراً @${userId.split('@')[0]}، الدخول مسموح فقط عبر بوت الواجهة الرئيسية.`, mentions: [userId] });
@@ -94,10 +105,11 @@ async function startBot() {
         const body = (m.message.conversation || m.message.extendedTextMessage?.text || "").trim();
         const pushName = m.pushName || "مستخدم";
         
-        let db = loadData();
-
-        if (!db[participant]) {
-            db[participant] = { points: 0, greeted: false, name: pushName, id: participant, joinedGroups: [] };
+        // جلب بيانات المستخدم من السحابة أو إنشاء جديد
+        let userData = await User.findOne({ id: participant });
+        if (!userData) {
+            userData = new User({ id: participant, name: pushName });
+            await userData.save();
         }
 
         // --- نظام النقاط في الجروبات ---
@@ -105,29 +117,28 @@ async function startBot() {
             const now = Date.now();
             const lastSeen = cooldowns.get(participant) || 0;
             if (now - lastSeen > 3000) {
-                db[participant].points += 2; // زيادة نقطتين فورا
-                db[participant].name = pushName;
+                userData.points += 2; // زيادة نقطتين فورا
+                userData.name = pushName;
                 cooldowns.set(participant, now);
-                let currentRank = getRankInfo(db[participant].points);
+                let currentRank = getRankInfo(userData.points);
 
-                if (db[participant].points >= currentRank.req && currentRank.next !== "القمة") {
-                    db[participant].points = 0; // تصفير عند الترقية
-                    saveData(db);
+                if (userData.points >= currentRank.req && currentRank.next !== "القمة") {
+                    userData.points = 0; // تصفير عند الترقية
+                    await userData.save();
                     await sock.sendMessage(remoteJid, { 
                         text: `🎊 كفو يا ${pushName}! ارتقيت لرتبة [ ${currentRank.next} ]\nتم تصفير نقاطك وبدأ تحدي الرتبة الجديدة! 🔥🚀`,
                         mentions: [participant]
                     });
                 } else {
-                    saveData(db);
+                    await userData.save();
                 }
             }
             return;
         }
 
-        const userPoints = db[remoteJid].points;
+        const userPoints = userData.points;
         const rank = getRankInfo(userPoints);
-        if (!db[remoteJid].joinedGroups) db[remoteJid].joinedGroups = [];
-
+        
         const sendText = async (txt) => {
             await sock.sendMessage(remoteJid, { text: txt });
         };
@@ -136,9 +147,9 @@ async function startBot() {
 
         // --- أمر تحديث السجلات ---
         if (body === 'تحديث') {
-            db[remoteJid].joinedGroups = [];
-            db[remoteJid].lastGroupRequested = null;
-            saveData(db);
+            userData.joinedGroups = [];
+            userData.lastGroupRequested = null;
+            await userData.save();
             await sendText("✅ تم تحديث سجلاتك بنجاح! يمكنك الآن اختيار جروبات جديدة من الواجهة الرئيسية.");
             return;
         }
@@ -149,9 +160,7 @@ async function startBot() {
             const pts = parseInt(args[1]);
             const target = m.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
             if (target && !isNaN(pts)) {
-                if (!db[target]) db[target] = { points: 0, greeted: false, name: "غير معروف", id: target, joinedGroups: [] };
-                db[target].points += pts;
-                saveData(db);
+                await User.findOneAndUpdate({ id: target }, { $inc: { points: pts } }, { upsert: true });
                 await sendText(`✅ تم إضافة ${pts} نقطة بنجاح.`);
                 return;
             }
@@ -164,27 +173,27 @@ async function startBot() {
 
         const num = parseInt(body);
 
-        if (['16', 'ابدأ', 'هلا', '.'].includes(body) || !db[remoteJid].greeted) {
-            db[remoteJid].greeted = true;
-            saveData(db);
+        if (['16', 'ابدأ', 'هلا', '.'].includes(body) || !userData.greeted) {
+            userData.greeted = true;
+            await userData.save();
             await sendMainMenu();
         } 
         else if (num >= 1 && num <= 8) {
             const groupId = body;
             const selection = groupInfo[groupId];
 
-            if (db[remoteJid].joinedGroups.includes(groupId)) {
-                db[remoteJid].lastGroupRequested = selection.link;
-                saveData(db);
+            if (userData.joinedGroups.includes(groupId)) {
+                userData.lastGroupRequested = selection.link;
+                await userData.save();
                 await sendText(`🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀`);
             } 
-            else if (db[remoteJid].joinedGroups.length >= 2) {
-                await sendText(`⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[db[remoteJid].joinedGroups[0]].name}\n2️⃣ ${groupInfo[db[remoteJid].joinedGroups[1]].name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪`);
+            else if (userData.joinedGroups.length >= 2) {
+                await sendText(`⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[userData.joinedGroups[0]].name}\n2️⃣ ${groupInfo[userData.joinedGroups[1]].name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪`);
             } 
             else {
-                db[remoteJid].joinedGroups.push(groupId);
-                db[remoteJid].lastGroupRequested = selection.link;
-                saveData(db);
+                userData.joinedGroups.push(groupId);
+                userData.lastGroupRequested = selection.link;
+                await userData.save();
                 await sendText(`🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀`);
                 
                 setTimeout(async () => {
