@@ -11,14 +11,14 @@ const fs = require('fs');
 const pino = require('pino');
 const mongoose = require('mongoose');
 const axios = require('axios');
-const http = require('http'); // تم الإضافة لإبقاء السيرفر حياً
+const http = require('http'); // 1. تعديل: إضافة مكتبة الـ HTTP
 
 /**
  * نظام DB-LENRAH المتكامل
  * الإصدار: 5.0 (الذكاء الاصطناعي والحماية القصوى - نسخة Railway المستقرة)
  */
 
-// --- إضافة خادم ويب بسيط لمنع الـ Loop في Railway ---
+// --- 2. تعديل: تشغيل سيرفر ويب بسيط لمنع Railway من عمل Restart للبوت ---
 const port = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -52,7 +52,7 @@ const badWords = [
     "لعنة", "تفو", "يا وطي", "يا زفت", "حقير", "سافل" 
 ];
 
-// --- بيانات الجروبات كاملة بدون حذف ---
+// --- بيانات الجروبات ---
 const groupInfo = {
     "1": { name: "البرمجة والتقنية", link: "https://chat.whatsapp.com/KHsm9hAJFBbFOp8fWN1erl?mode=gi_t", id: "1203630412345678@g.us" },
     "2": { name: "التصميم والمونتاج", link: "https://chat.whatsapp.com/CZUOT2QkozUAGfjYt0cCX3?mode=gi_t", id: "1203630412345679@g.us" },
@@ -90,7 +90,7 @@ async function startBot() {
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // تم الإيقاف لتجنب التحذير وطباعته يدوياً تحت
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ['DB-Lenrah', 'Chrome', '1.0.0'],
         syncFullHistory: false
@@ -229,7 +229,7 @@ async function startBot() {
         }
     });
 
-    // --- نظام الاتصال المصلح ليعرض الـ QR مرة واحدة ويوقف الـ Loop ---
+    // --- 3. تعديل: نظام الاتصال المصلح ليعرض الـ QR مرة واحدة ويوقف الـ Loop بالتعاون مع سيرفر الـ HTTP ---
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
