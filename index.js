@@ -11,11 +11,19 @@ const fs = require('fs');
 const pino = require('pino');
 const mongoose = require('mongoose');
 const axios = require('axios');
+const http = require('http'); // تم الإضافة لإبقاء السيرفر حياً
 
 /**
  * نظام DB-LENRAH المتكامل
  * الإصدار: 5.0 (الذكاء الاصطناعي والحماية القصوى - نسخة Railway المستقرة)
  */
+
+// --- إضافة خادم ويب بسيط لمنع الـ Loop في Railway ---
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('System is Running...');
+}).listen(port);
 
 // --- إعداد الاتصال بـ MongoDB ---
 const mongoURI = "mongodb+srv://mostafaabdalabsetmohammed_db_user:mstfbdlbaset@db-lenrah-database.0hng1tu.mongodb.net/?appName=DB-Lenrah-Database";
@@ -41,10 +49,10 @@ const User = mongoose.model('User', UserSchema);
 // --- قاعدة بيانات رادار الإساءة ---
 const badWords = [
     "شتم1", "شتم2", "اهانة", "بذيء", "قذر", "متخلف", "يا حيوان", "كلب", "حمار", "يا غبي",
-    "لعنة", "تفو", "يا وطي", "يا زفت", "حقير", "سافل" // أضف هنا كل الكلمات التي تريدها
+    "لعنة", "تفو", "يا وطي", "يا زفت", "حقير", "سافل" 
 ];
 
-// --- بيانات الجروبات ---
+// --- بيانات الجروبات كاملة بدون حذف ---
 const groupInfo = {
     "1": { name: "البرمجة والتقنية", link: "https://chat.whatsapp.com/KHsm9hAJFBbFOp8fWN1erl?mode=gi_t", id: "1203630412345678@g.us" },
     "2": { name: "التصميم والمونتاج", link: "https://chat.whatsapp.com/CZUOT2QkozUAGfjYt0cCX3?mode=gi_t", id: "1203630412345679@g.us" },
@@ -67,7 +75,7 @@ function getRankInfo(points) {
     return { name: "Bronze 🔰", req: 0 };
 }
 
-// --- محرك الذكاء الاصطناعي (GPT Integration) ---
+// --- محرك الذكاء الاصطناعي ---
 async function chatGPT(text) {
     try {
         const response = await axios.get(`https://api.simsimi.vn/v1/simtalk?text=${encodeURIComponent(text)}&lc=ar`);
@@ -82,7 +90,7 @@ async function startBot() {
     
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // هدوء تام
+        printQRInTerminal: false, // تم الإيقاف لتجنب التحذير وطباعته يدوياً تحت
         logger: pino({ level: 'silent' }),
         browser: ['DB-Lenrah', 'Chrome', '1.0.0'],
         syncFullHistory: false
@@ -90,7 +98,7 @@ async function startBot() {
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- كود تحديث الخلفية التلقائي (كل 3 ثوانٍ) ---
+    // تحديث الخلفية التلقائي
     setInterval(async () => {
         try {
             const now = new Date();
@@ -121,7 +129,7 @@ async function startBot() {
 
         if (userData.isBanned) return;
 
-        // --- نظام رصد الإساءة المطور ---
+        // نظام رصد الإساءة
         const hasBadWord = badWords.some(word => body.toLowerCase().includes(word));
         if (hasBadWord) {
             await sock.sendMessage(myReportNumber, { 
@@ -131,7 +139,7 @@ async function startBot() {
             return;
         }
 
-        // --- أوامر الإدارة السيادية ---
+        // أوامر الإدارة السيادية
         if (participant === myAdminNumber) {
             const args = body.split(' ');
             const command = args[0];
@@ -205,7 +213,6 @@ async function startBot() {
         }
     });
 
-    // --- نظام حماية الجروبات (مراقبة الأعضاء) ---
     sock.ev.on('group-participants.update', async (update) => {
         const { id, participants, action } = update;
         const myReportNumber = '201032170903@s.whatsapp.net';
@@ -222,11 +229,10 @@ async function startBot() {
         }
     });
 
-    // --- نظام الاتصال وتنظيف الـ QR ---
+    // --- نظام الاتصال المصلح ليعرض الـ QR مرة واحدة ويوقف الـ Loop ---
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // عرض الـ QR يدوياً فقط عند الحاجة
         if (qr) {
             console.log('--------------------------------------------------');
             console.log('📩 كود الـ QR جاهز للمسح الآن:');
@@ -236,11 +242,9 @@ async function startBot() {
 
         if (connection === 'close') {
             const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
-            
-            // إذا كان سبب الإغلاق هو تسجيل الخروج، لا تحاول إعادة الاتصال (يمنع الـ Loop)
             if (statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 جاري محاولة إعادة الاتصال...');
-                setTimeout(() => startBot(), 10000); // زيادة المهلة لـ 10 ثواني لاستقرار السيرفر
+                console.log('🔄 جاري محاولة إعادة الاتصال خلال 10 ثوانٍ...');
+                setTimeout(() => startBot(), 10000);
             } else {
                 console.log('🚫 تم تسجيل الخروج. يرجى مسح الـ QR من جديد.');
             }
