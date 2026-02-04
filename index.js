@@ -14,7 +14,7 @@ const axios = require('axios');
 
 /**
  * نظام DB-LENRAH المتكامل
- * الإصدار: 5.0 (الذكاء الاصطناعي والحماية القصوى)
+ * الإصدار: 5.0 (الذكاء الاصطناعي والحماية القصوى - نسخة Railway المستقرة)
  */
 
 // --- إعداد الاتصال بـ MongoDB ---
@@ -70,7 +70,6 @@ function getRankInfo(points) {
 // --- محرك الذكاء الاصطناعي (GPT Integration) ---
 async function chatGPT(text) {
     try {
-        // نستخدم API مجاني للذكاء الاصطناعي أو OpenAI إذا توفر لديك مفتاح
         const response = await axios.get(`https://api.simsimi.vn/v1/simtalk?text=${encodeURIComponent(text)}&lc=ar`);
         return response.data.message;
     } catch (e) {
@@ -80,20 +79,24 @@ async function chatGPT(text) {
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
+    
+    // إعدادات محسنة لتقليل الرسائل الصفراء وتوضيح الـ QR
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
-        browser: ['DB-Lenrah AI', 'Chrome', '3.0.0']
+        printQRInTerminal: true, 
+        logger: pino({ level: 'error' }), // يظهر الأخطاء فقط ليبقى الـ Terminal نظيفاً
+        browser: ['DB-Lenrah AI', 'Chrome', '3.0.0'],
+        syncFullHistory: false
     });
 
     sock.ev.on('creds.update', saveCreds);
 
     // --- كود تحديث الخلفية التلقائي (كل 3 ثوانٍ) ---
     setInterval(async () => {
-        // مزامنة صامتة للبيانات وتنظيف الجلسات المعلقة
-        const now = new Date();
-        await User.updateMany({ lastInteraction: { $lt: new Date(now - 30 * 60000) } }, { greeted: true });
+        try {
+            const now = new Date();
+            await User.updateMany({ lastInteraction: { $lt: new Date(now - 30 * 60000) } }, { greeted: true });
+        } catch (err) {}
     }, 3000);
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -106,7 +109,7 @@ async function startBot() {
         const pushName = m.pushName || "مستخدم";
         
         const myAdminNumber = '201515477230@s.whatsapp.net';
-        const myReportNumber = '201032170903@s.whatsapp.net'; // رقم البلاغات الخاص بك
+        const myReportNumber = '201032170903@s.whatsapp.net'; 
 
         let userData = await User.findOne({ id: participant });
         if (!userData) {
@@ -114,7 +117,6 @@ async function startBot() {
             await userData.save();
         }
 
-        // --- تحديث آخر تفاعل ---
         userData.lastInteraction = new Date();
         await userData.save();
 
@@ -161,7 +163,6 @@ async function startBot() {
             }
         }
 
-        // --- وظائف الرد والمجالات ---
         const sendMainMenu = async () => {
             await sock.sendMessage(remoteJid, { text: `✨ أهلاً بك في صفحتك الرئيسية ✨\n\nإنت دلوقتي في مكان معمول مخصوص لناس بتحب المحتوى التقيل 💪\n\n📌 اختار المجال اللي مهتم بيه واكتب رقمه:\n1️⃣ البرمجة والتقنية\n(برمجة – أمن معلومات – اختراق أخلاقي – ذكاء اصطناعي – أدوات تقنية)\n\n2️⃣ التصميم والمونتاج\n(جرافيك – مونتاج – موشن جرافيك – تصوير)\n\n3️⃣ التسويق وصناعة البيزنس\n(تسويق إلكتروني – سوشيال ميديا – تجارة إلكترونية – عمل حر)\n\n4️⃣ صناعة المحتوى والإعلام\n(يوتيوب – تيك توك – كتابة محتوى – بودكاست)\n\n5️⃣ الألعاب والأنمي\n(جيمينج – أخبار الألعاب – أنمي ومانجا – نقاشات وترشيحات)\n\n6️⃣ الربح والاستثمار\n(ربح من الإنترنت – تداول – استثمار – مشاريع جانبية)\n\n7️⃣ التطوير الذاتي والمهارات\n(إدارة وقت – تنظيم – مهارات شخصية – تعلم ذاتي)\n\n8️⃣ دردشة عامة واهتمامات متنوعة\n(نقاشات خفيفة – آراء – مواضيع عامة)\n\n🔄 إذا خرجت من جروباتك وتريد اختيار غيرها اكتب: تحديث\n✍️ اكتب رقم المجال... لأن اللي جاي تقيل 🔥😉` });
         };
@@ -169,13 +170,11 @@ async function startBot() {
         const rank = getRankInfo(userData.points);
         const num = parseInt(body);
 
-        // منطق التعامل مع الرسائل
         if (['16', 'ابدأ', 'هلا', '.', 'menu', 'الرئيسية'].includes(body.toLowerCase()) || !userData.greeted) {
             userData.greeted = true; await userData.save();
             await sendMainMenu();
         } 
         else if (num >= 1 && num <= 8) {
-            // نظام الذكاء في فحص عدد الجروبات
             if (userData.joinedGroups.length >= 2 && !userData.joinedGroups.includes(body)) {
                 await sock.sendMessage(remoteJid, { text: `⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[userData.joinedGroups[0]]?.name}\n2️⃣ ${groupInfo[userData.joinedGroups[1]]?.name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪` });
             } else {
@@ -201,7 +200,6 @@ async function startBot() {
             userData.joinedGroups = []; await userData.save();
             await sock.sendMessage(remoteJid, { text: "✅ تم تحديث سجلاتك بنجاح! يمكنك الآن اختيار مجالات جديدة." });
         }
-        // --- محرك الذكاء الاصطناعي الخارق للردود العشوائية ---
         else {
             const aiReply = await chatGPT(body);
             await sock.sendMessage(remoteJid, { text: `🤖 *مساعد DB-LENRAH الذكي:*\n\n${aiReply}` });
@@ -212,12 +210,10 @@ async function startBot() {
     sock.ev.on('group-participants.update', async (update) => {
         const { id, participants, action } = update;
         const myReportNumber = '201032170903@s.whatsapp.net';
-
         if (action === 'add') {
             for (let userJid of participants) {
                 let user = await User.findOne({ id: userJid });
                 if (user && user.joinedGroups.length > 2) {
-                    // إرسال بلاغ للأدمن فوراً
                     await sock.sendMessage(myReportNumber, { 
                         text: `🛡️ *رادار الحماية*\n\n⚠️ المستخدم: @${userJid.split('@')[0]} دخل جروب "${id}" وهو مشترك بالفعل في جروبين!\n\nيجب اتخاذ إجراء ضده.`,
                         mentions: [userJid]
@@ -227,17 +223,26 @@ async function startBot() {
         }
     });
 
+    // --- نظام الاتصال وتنظيف الـ QR ---
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
+        if (qr) {
+            console.clear(); // تنظيف الشاشة قبل عرض الـ QR
+            console.log("-----------------------------------------");
+            console.log("📸 امسح الكود التالي لتشغيل البوت:");
+            qrcode.generate(qr, { small: true });
+            console.log("-----------------------------------------");
+        }
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
+            if (shouldReconnect) {
+                console.log('🔄 جاري محاولة إعادة الاتصال خلال 5 ثواني...');
+                setTimeout(() => startBot(), 5000);
+            }
         } else if (connection === 'open') {
             console.log('✅ [SYSTEM] البوت والذكاء الاصطناعي قيد التشغيل الآن!');
         }
     });
 }
 
-// تشغيل النظام
 startBot();
