@@ -231,27 +231,23 @@ async function startBot() {
 
     // --- 3. تعديل: نظام الاتصال المصلح ليعرض الـ QR مرة واحدة ويوقف الـ Loop بالتعاون مع سيرفر الـ HTTP ---
     sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            console.log('--------------------------------------------------');
-            console.log('📩 كود الـ QR جاهز للمسح الآن:');
-            qrcode.generate(qr, { small: true });
-            console.log('--------------------------------------------------');
-        }
+    const { connection, lastDisconnect, qr } = update;
+    
+    if (qr) {
+        console.log('--- SCAN THIS QR CODE ---');
+        qrcode.generate(qr, { small: true }); // هذا السطر هو المسؤول عن ظهور المربعات في Koyeb
+    }
 
-        if (connection === 'close') {
-            const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
-            if (statusCode !== DisconnectReason.loggedOut) {
-                console.log('🔄 جاري محاولة إعادة الاتصال خلال 10 ثوانٍ...');
-                setTimeout(() => startBot(), 10000);
-            } else {
-                console.log('🚫 تم تسجيل الخروج. يرجى مسح الـ QR من جديد.');
-            }
-        } else if (connection === 'open') {
-            console.log('✅ [SUCCESS] تم تشغيل البوت بنجاح وهو الآن متاح للخدمة!');
+    if (connection === 'close') {
+        const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+            startBot();
         }
-    });
+    } else if (connection === 'open') {
+        console.log('✅ Connected!');
+    }
+});
+
 }
 
 startBot();
