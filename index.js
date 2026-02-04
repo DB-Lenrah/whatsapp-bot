@@ -180,6 +180,21 @@ async function startBot() {
         }
     });
 
-    sock.ev.on('connection.update', (u) => { if (u.connection === 'close') startBot(); });
+    sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+        console.log("-----------------------------------------");
+        console.log("📷 SCAN THE QR CODE BELOW:");
+        qrcode.generate(qr, { small: true });
+        console.log("-----------------------------------------");
+    }
+    if (connection === 'close') {
+        const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (shouldReconnect) startBot();
+    } else if (connection === 'open') {
+        console.log('✅ البوت متصل الآن وشغال!');
+    }
+});
+
 }
 startBot();
