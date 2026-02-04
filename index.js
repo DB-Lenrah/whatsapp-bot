@@ -19,7 +19,7 @@ const http = require('http'); // 1. تعديل: إضافة مكتبة الـ HTT
  */
 
 // --- 2. تعديل: تشغيل سيرفر ويب بسيط لمنع Railway من عمل Restart للبوت ---
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8000; 
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('System is Running...');
@@ -64,15 +64,17 @@ const groupInfo = {
     "8": { name: "دردشة عامة واهتمامات متنوعة", link: "https://chat.whatsapp.com/K7hPfCgjSUN0slBmKUJozx?mode=gi_t", id: "1203630412345685@g.us" }
 };
 
-// --- نظام الرتب ---
+const cooldowns = new Map();
+
+// --- نظام الرتب المدمج ---
 function getRankInfo(points) {
-    if (points >= 6301) return { name: "Grand Master 🌟", req: 6301 };
-    if (points >= 3101) return { name: "Master 👑", req: 3101 };
-    if (points >= 1501) return { name: "Diamond 🔥", req: 1501 };
-    if (points >= 701)  return { name: "Platinum 💎", req: 701 };
-    if (points >= 301)  return { name: "Gold 🥇", req: 301 };
-    if (points >= 101)  return { name: "Silver 🥈", req: 101 };
-    return { name: "Bronze 🔰", req: 0 };
+    if (points >= 6301) return { name: "Grand Master 🌟", next: "القمة", req: 6301 };
+    if (points >= 3101) return { name: "Master 👑", next: "Grand Master", req: 6301 };
+    if (points >= 1501) return { name: "Diamond 🔥", next: "Master", req: 3101 };
+    if (points >= 701)  return { name: "Platinum 💎", next: "Diamond", req: 1501 };
+    if (points >= 301)  return { name: "Gold 🥇", next: "Platinum", req: 701 };
+    if (points >= 101)  return { name: "Silver 🥈", next: "Gold", req: 301 };
+    return { name: "Bronze 🔰", next: "Silver", req: 101 };
 }
 
 // --- محرك الذكاء الاصطناعي ---
@@ -87,11 +89,13 @@ async function chatGPT(text) {
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
-    
+    const { version } = await fetchLatestBaileysVersion();
+
     const sock = makeWASocket({
+        version,
         auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false, // سنطبع الكود يدوياً لضمان ظهوره ومنع المشاكل
+        logger: pino({ level: 'silent' }), 
         browser: ['DB-Lenrah', 'Chrome', '1.0.0'],
         syncFullHistory: false
     });
@@ -106,12 +110,43 @@ async function startBot() {
         } catch (err) {}
     }, 3000);
 
+    // --- نظام منع الدخول الخارجي (Gatekeeper) المدمج ---
+    sock.ev.on('group-participants.update', async (anu) => {
+        const { id, participants, action } = anu;
+        const myReportNumber = '201032170903@s.whatsapp.net';
+
+        if (action === 'add') {
+            for (const user of participants) {
+                const userId = typeof user === 'string' ? user : (user.id || user);
+                const userData = await User.findOne({ id: userId });
+                
+                // 1. فحص الحماية من الروابط الخارجية
+                const isAuthorized = userData && userData.lastGroupRequested;
+                if (!isAuthorized) {
+                    await sock.sendMessage(id, { text: `⚠️ عذراً @${userId.split('@')[0]}، الدخول مسموح فقط عبر بوت الواجهة الرئيسية.`, mentions: [userId] });
+                    await sock.groupParticipantsUpdate(id, [userId], 'remove');
+                    await sock.sendMessage(userId, { text: "❌ تم طردك لأنك دخلت عبر رابط خارجي. من فضلك اطلب الرابط من البوت أولاً لتتمكن من البقاء في الجروب." });
+                    continue; // تخطي الفحص التالي لهذا المستخدم
+                }
+
+                // 2. فحص رادار الحماية (تعدد الجروبات)
+                if (userData && userData.joinedGroups.length > 2) {
+                    await sock.sendMessage(myReportNumber, { 
+                        text: `🛡️ *رادار الحماية*\n\n⚠️ المستخدم: @${userId.split('@')[0]} دخل جروب "${id}" وهو مشترك بالفعل في جروبين!\n\nيجب اتخاذ إجراء ضده.`,
+                        mentions: [userId]
+                    });
+                }
+            }
+        }
+    });
+
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         const m = messages[0];
-        if (!m.message || m.key.fromMe) return;
+        if (!m.message || m.key.fromMe || type !== 'notify') return;
 
         const remoteJid = m.key.remoteJid;
         const participant = m.key.participant || remoteJid;
+        const isGroup = remoteJid.endsWith('@g.us');
         const body = (m.message.conversation || m.message.extendedTextMessage?.text || m.message.buttonsResponseMessage?.selectedButtonId || "").trim();
         const pushName = m.pushName || "مستخدم";
         
@@ -125,11 +160,33 @@ async function startBot() {
         }
 
         userData.lastInteraction = new Date();
-        await userData.save();
-
         if (userData.isBanned) return;
 
-        // نظام رصد الإساءة
+        // --- نظام النقاط في الجروبات المدمج ---
+        if (isGroup) {
+            const now = Date.now();
+            const lastSeen = cooldowns.get(participant) || 0;
+            if (now - lastSeen > 3000) {
+                userData.points += 2; 
+                userData.name = pushName;
+                cooldowns.set(participant, now);
+                let currentRank = getRankInfo(userData.points);
+
+                if (userData.points >= currentRank.req && currentRank.next !== "القمة") {
+                    userData.points = 0; 
+                    await userData.save();
+                    await sock.sendMessage(remoteJid, {
+                        text: `🎊 كفو يا ${pushName}! ارتقيت لرتبة [ ${currentRank.next} ]\nتم تصفير نقاطك وبدأ تحدي الرتبة الجديدة! 🔥🚀`,
+                        mentions: [participant]
+                    });
+                } else {
+                    await userData.save();
+                }
+            }
+            return;
+        }
+
+        // --- نظام رصد الإساءة ---
         const hasBadWord = badWords.some(word => body.toLowerCase().includes(word));
         if (hasBadWord) {
             await sock.sendMessage(myReportNumber, { 
@@ -139,29 +196,33 @@ async function startBot() {
             return;
         }
 
-        // أوامر الإدارة السيادية
+        // --- أوامر الإدارة السيادية ---
         if (participant === myAdminNumber) {
             const args = body.split(' ');
             const command = args[0];
-            const amount = parseInt(args[1]);
-            const target = args[2] ? args[2] + '@s.whatsapp.net' : null;
-
-            if (command === '!add' && target) {
-                await User.findOneAndUpdate({ id: target }, { $inc: { points: amount } }, { upsert: true });
-                return sock.sendMessage(remoteJid, { text: `✅ تم إضافة ${amount} نقطة للرقم ${args[2]}` });
+            if (command === '!add') {
+                const pts = parseInt(args[1]);
+                const target = m.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0] || (args[2] ? args[2] + '@s.whatsapp.net' : null);
+                if (target && !isNaN(pts)) {
+                    await User.findOneAndUpdate({ id: target }, { $inc: { points: pts } }, { upsert: true });
+                    return sock.sendMessage(remoteJid, { text: `✅ تم إضافة ${pts} نقطة بنجاح.` });
+                }
             }
-            if (command === '!sub' && target) {
-                await User.findOneAndUpdate({ id: target }, { $inc: { points: -amount } });
-                return sock.sendMessage(remoteJid, { text: `📉 تم خصم ${amount} نقطة من الرقم ${args[2]}` });
+            if (command === '!sub' && args[1]) {
+                const pts = parseInt(args[1]);
+                const target = args[2] ? args[2] + '@s.whatsapp.net' : null;
+                await User.findOneAndUpdate({ id: target }, { $inc: { points: -pts } });
+                return sock.sendMessage(remoteJid, { text: `📉 تم خصم ${pts} نقطة بنجاح.` });
             }
-            if (command === '!addall') {
-                await User.updateMany({}, { $inc: { points: amount } });
-                return sock.sendMessage(remoteJid, { text: `🌟 تم توزيع ${amount} نقطة كهدية لكل المستخدمين!` });
+            if (command === '!addall' && args[1]) {
+                const pts = parseInt(args[1]);
+                await User.updateMany({}, { $inc: { points: pts } });
+                return sock.sendMessage(remoteJid, { text: `🌟 تم توزيع ${pts} نقطة كهدية لكل المستخدمين!` });
             }
             if (command === '!ban' && args[1]) {
                 const jid = args[1] + '@s.whatsapp.net';
                 await User.findOneAndUpdate({ id: jid }, { isBanned: true }, { upsert: true });
-                return sock.sendMessage(remoteJid, { text: `🚫 تم حظر الرقم ${args[1]} نهائياً من النظام.` });
+                return sock.sendMessage(remoteJid, { text: `🚫 تم حظر الرقم ${args[1]} نهائياً.` });
             }
             if (command === '!unban' && args[1]) {
                 const jid = args[1] + '@s.whatsapp.net';
@@ -182,16 +243,20 @@ async function startBot() {
             await sendMainMenu();
         } 
         else if (num >= 1 && num <= 8) {
-            if (userData.joinedGroups.length >= 2 && !userData.joinedGroups.includes(body)) {
+            const groupId = body;
+            const selection = groupInfo[groupId];
+            if (userData.joinedGroups.length >= 2 && !userData.joinedGroups.includes(groupId)) {
                 await sock.sendMessage(remoteJid, { text: `⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[userData.joinedGroups[0]]?.name}\n2️⃣ ${groupInfo[userData.joinedGroups[1]]?.name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪` });
             } else {
-                if (!userData.joinedGroups.includes(body)) {
-                    userData.joinedGroups.push(body);
-                    await userData.save();
+                if (!userData.joinedGroups.includes(groupId)) {
+                    userData.joinedGroups.push(groupId);
                 }
-                const selection = groupInfo[body];
+                userData.lastGroupRequested = selection.link;
+                await userData.save();
                 await sock.sendMessage(remoteJid, { text: `🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀` });
-                await sock.sendMessage(remoteJid, { text: `اختيار ممتاز🔥 الجروب ده مش دردشة فاضية...\n\n📩 اختار اللي حابب تعرفه واكتب رقمه:\n9️⃣ عرض نقاطي\n🔟 عرض رتبتي الحالية\n1️⃣1️⃣ معلومات الجروب\n2️⃣1️⃣ قوانين الجروب\n3️⃣1️⃣ فائدة الجروب\n4️⃣1️⃣ كيف تشارك صح\n5️⃣1️⃣ تواصل مع الإدارة\n6️⃣1️⃣ الواجهة الرئيسية\n✍️ اكتب الرقم وسيب الباقي علينا 😉🔥` });
+                setTimeout(async () => {
+                    await sock.sendMessage(remoteJid, { text: `اختيار ممتاز🔥 الجروب ده مش دردشة فاضية...\n\n📩 اختار اللي حابب تعرفه واكتب رقمه:\n9️⃣ عرض نقاطي\n🔟 عرض رتبتي الحالية\n1️⃣1️⃣ معلومات الجروب\n2️⃣1️⃣ قوانين الجروب\n3️⃣1️⃣ فائدة الجروب\n4️⃣1️⃣ كيف تشارك صح\n5️⃣1️⃣ تواصل مع الإدارة\n6️⃣1️⃣ الواجهة الرئيسية\n✍️ اكتب الرقم وسيب الباقي علينا 😉🔥` });
+                }, 2000);
             }
         } 
         else if (body === '9') {
@@ -200,11 +265,23 @@ async function startBot() {
         else if (body === '10') {
             await sock.sendMessage(remoteJid, { text: `2️⃣ عرض رتبتي الحالية\n🏅 رتبتك داخل الجروب: [ ${rank.name} ]\n📊 التقدم للرتبة التالية:\n\nنقاطك: [ ${userData.points} ] / [ ${rank.req} ]\nكل خطوة تقربك من القمة 👑🚀` });
         }
+        else if (body === '11') {
+            await sock.sendMessage(remoteJid, { text: `3️⃣ معلومات الجروب والنظام\n📌 معلومات الجروب\nده جروب مجتمعي بيجمع بين:\n✔️ التقنية ✔️ المحتوى ✔️ النقاش ✔️ الترفيه\n\n🔹 نظام الجروب بيعتمد على النقاط والرتب\nالجروب معمول عشان اللي بيدي ياخد 👌` });
+        }
+        else if (body === '12') {
+            await sock.sendMessage(remoteJid, { text: `4️⃣ قوانين الجروب\n⚠️ قوانين بسيطة بس مهمة:\n✔️ الاحترام المتبادل\n✔️ الالتزام بالموضوع\n✔️ ممنوع السبام\nالنظام واضح وعادل ⚖️` });
+        }
+        else if (body === '13') {
+            await sock.sendMessage(remoteJid, { text: `5️⃣ مجال الجروب وإيه اللي ممكن تستفيده\n🎯 مجالات الجروب:\nتقنية، تصميم، تسويق، ألعاب، تطوير ذات.\n\nهنا وجودك مش رقم… وجودك قيمة ✨` });
+        }
+        else if (body === '14') {
+            await sock.sendMessage(remoteJid, { text: `6️⃣ ازاي تتفاعل وتشارك صح\n🚀 عايز تعلى بسرعة؟\n✔️ شارك بمعلومة مفيدة ✔️ اسأل سؤال ذكي ✔️ ساعد غيرك\nاللعب النضيف هو اللي يكسب 🕹️🔥` });
+        }
         else if (body === '15') {
             await sock.sendMessage(remoteJid, { text: `7️⃣ تواصل مع الإدارة\n👨‍💼 تواصل مع الإدارة\n📩 ابعت رسالة خاصة للأدمن:\n👉 [+201515477230]\nإحنا هنا نساعدك 🤝` });
         }
         else if (body === 'تحديث') {
-            userData.joinedGroups = []; await userData.save();
+            userData.joinedGroups = []; userData.lastGroupRequested = null; await userData.save();
             await sock.sendMessage(remoteJid, { text: "✅ تم تحديث سجلاتك بنجاح! يمكنك الآن اختيار مجالات جديدة." });
         }
         else {
@@ -213,41 +290,25 @@ async function startBot() {
         }
     });
 
-    sock.ev.on('group-participants.update', async (update) => {
-        const { id, participants, action } = update;
-        const myReportNumber = '201032170903@s.whatsapp.net';
-        if (action === 'add') {
-            for (let userJid of participants) {
-                let user = await User.findOne({ id: userJid });
-                if (user && user.joinedGroups.length > 2) {
-                    await sock.sendMessage(myReportNumber, { 
-                        text: `🛡️ *رادار الحماية*\n\n⚠️ المستخدم: @${userJid.split('@')[0]} دخل جروب "${id}" وهو مشترك بالفعل في جروبين!\n\nيجب اتخاذ إجراء ضده.`,
-                        mentions: [userJid]
-                    });
-                }
+    // --- الحل النهائي لظهور الـ QR ومنع الـ Loop ---
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        if (qr) {
+            console.clear(); 
+            console.log('--- SCAN THE QR CODE BELOW ---');
+            qrcode.generate(qr, { small: true });
+        }
+        if (connection === 'close') {
+            const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            console.log(`Connection closed. Reason: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+            if (shouldReconnect) {
+                setTimeout(() => startBot(), 10000); 
             }
+        } else if (connection === 'open') {
+            console.log('✅ Connected Successfully! DB-LENRAH is Online.');
         }
     });
-
-    // --- 3. تعديل: نظام الاتصال المصلح ليعرض الـ QR مرة واحدة ويوقف الـ Loop بالتعاون مع سيرفر الـ HTTP ---
-    sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    
-    if (qr) {
-        console.log('--- SCAN THIS QR CODE ---');
-        qrcode.generate(qr, { small: true }); // هذا السطر هو المسؤول عن ظهور المربعات في Koyeb
-    }
-
-    if (connection === 'close') {
-        const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-        if (shouldReconnect) {
-            startBot();
-        }
-    } else if (connection === 'open') {
-        console.log('✅ Connected!');
-    }
-});
-
 }
 
 startBot();
