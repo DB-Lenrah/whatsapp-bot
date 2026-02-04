@@ -8,28 +8,30 @@ const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const pino = require('pino');
-const mongoose = require('mongoose'); // إضافة مكتبة المونجو
+const mongoose = require('mongoose');
 
 // --- إعداد الاتصال بـ MongoDB ---
-// استبدل كلمة PASSWORD بكلمة السر الحقيقية الخاصة بك
 const mongoURI = "mongodb+srv://mostafaabdalabsetmohammed_db_user:mstfbdlbaset@db-lenrah-database.0hng1tu.mongodb.net/?appName=DB-Lenrah-Database";
 
 mongoose.connect(mongoURI).then(() => {
     console.log('✅ تم الاتصال بقاعدة البيانات السحابية بنجاح!');
 }).catch(err => console.error('❌ خطأ في الاتصال بـ MongoDB:', err));
 
-// تعريف الهيكل (Schema) بنفس بياناتك بالظبط
+// تعريف الهيكل (Schema) المطور
 const UserSchema = new mongoose.Schema({
     id: { type: String, unique: true },
     points: { type: Number, default: 0 },
     greeted: { type: Boolean, default: false },
     name: { type: String, default: "مستخدم" },
     joinedGroups: { type: Array, default: [] },
-    lastGroupRequested: { type: String, default: null }
+    lastGroupRequested: { type: String, default: null },
+    isBanned: { type: Boolean, default: false } // نظام الحظر
 });
 const User = mongoose.model('User', UserSchema);
 
-// بيانات الجروبات الأصلية الخاصة بك
+// قائمة الكلمات المسيئة
+const badWords = ["شتم1", "شتم2", "اهانة"]; 
+
 const groupInfo = {
     "1": { name: "البرمجة والتقنية", link: "https://chat.whatsapp.com/KHsm9hAJFBbFOp8fWN1erl?mode=gi_t" },
     "2": { name: "التصميم والمونتاج", link: "https://chat.whatsapp.com/CZUOT2QkozUAGfjYt0cCX3?mode=gi_t" },
@@ -44,188 +46,140 @@ const groupInfo = {
 const cooldowns = new Map();
 
 function getRankInfo(points) {
-    if (points >= 6301) return { name: "Grand Master 🌟", next: "القمة", req: 6301 };
-    if (points >= 3101) return { name: "Master 👑", next: "Grand Master", req: 6301 };
-    if (points >= 1501) return { name: "Diamond 🔥", next: "Master", req: 3101 };
-    if (points >= 701)  return { name: "Platinum 💎", next: "Diamond", req: 1501 };
-    if (points >= 301)  return { name: "Gold 🥇", next: "Platinum", req: 701 };
-    if (points >= 101)  return { name: "Silver 🥈", next: "Gold", req: 301 };
-    return { name: "Bronze 🔰", next: "Silver", req: 101 };
+    if (points >= 6301) return { name: "Grand Master 🌟", req: 6301, level: 7 };
+    if (points >= 3101) return { name: "Master 👑", req: 3101, level: 6 };
+    if (points >= 1501) return { name: "Diamond 🔥", req: 1501, level: 5 };
+    if (points >= 701)  return { name: "Platinum 💎", req: 701, level: 4 };
+    if (points >= 301)  return { name: "Gold 🥇", req: 301, level: 3 };
+    if (points >= 101)  return { name: "Silver 🥈", req: 101, level: 2 };
+    return { name: "Bronze 🔰", req: 0, level: 1 };
 }
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
-    const { version } = await fetchLatestBaileysVersion();
-
     const sock = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
         auth: state,
-        printQRInTerminal: true
+        printQRInTerminal: true,
+        logger: pino({ level: 'silent' })
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // --- نظام منع الدخول الخارجي (Gatekeeper) ---
-    sock.ev.on('group-participants.update', async (anu) => {
-        if (anu.action === 'add') {
-            for (const user of anu.participants) {
-                // تعديل تقني لضمان قراءة معرف المستخدم بشكل صحيح وتجنب خطأ split
-                const userId = typeof user === 'string' ? user : (user.id || user);
-                const userData = await User.findOne({ id: userId });
-                const isAuthorized = userData && userData.lastGroupRequested;
-                
-                if (!isAuthorized) {
-                    await sock.sendMessage(anu.id, { text: `⚠️ عذراً @${userId.split('@')[0]}، الدخول مسموح فقط عبر بوت الواجهة الرئيسية.`, mentions: [userId] });
-                    await sock.groupParticipantsUpdate(anu.id, [userId], 'remove');
-                    await sock.sendMessage(userId, { text: "❌ تم طردك لأنك دخلت عبر رابط خارجي. من فضلك اطلب الرابط من البوت أولاً لتتمكن من البقاء في الجروب." });
-                }
-            }
-        }
-    });
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) qrcode.generate(qr, { small: true });
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
-        } else if (connection === 'open') {
-            console.log('✅ البوت جاهز بنظام الحماية والنقاط المطور!');
-        }
-    });
-
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         const m = messages[0];
-        if (!m.message || m.key.fromMe || type !== 'notify') return;
+        if (!m.message || m.key.fromMe) return;
 
         const remoteJid = m.key.remoteJid;
         const participant = m.key.participant || remoteJid;
-        const isGroup = remoteJid.endsWith('@g.us');
         const body = (m.message.conversation || m.message.extendedTextMessage?.text || "").trim();
         const pushName = m.pushName || "مستخدم";
         
-        // جلب بيانات المستخدم من السحابة أو إنشاء جديد
+        const myAdminNumber = '201515477230@s.whatsapp.net';
+        const myReportNumber = '2010332170903@s.whatsapp.net';
+
         let userData = await User.findOne({ id: participant });
         if (!userData) {
             userData = new User({ id: participant, name: pushName });
             await userData.save();
         }
 
-        // --- نظام النقاط في الجروبات ---
-        if (isGroup) {
-            const now = Date.now();
-            const lastSeen = cooldowns.get(participant) || 0;
-            if (now - lastSeen > 3000) {
-                userData.points += 2; // زيادة نقطتين فورا
-                userData.name = pushName;
-                cooldowns.set(participant, now);
-                let currentRank = getRankInfo(userData.points);
+        // --- فحص الحظر ---
+        if (userData.isBanned) return;
 
-                if (userData.points >= currentRank.req && currentRank.next !== "القمة") {
-                    userData.points = 0; // تصفير عند الترقية
-                    await userData.save();
-                    await sock.sendMessage(remoteJid, { 
-                        text: `🎊 كفو يا ${pushName}! ارتقيت لرتبة [ ${currentRank.next} ]\nتم تصفير نقاطك وبدأ تحدي الرتبة الجديدة! 🔥🚀`,
-                        mentions: [participant]
-                    });
-                } else {
-                    await userData.save();
-                }
-            }
-            return;
+        // --- رصد الإساءة ---
+        const hasBadWord = badWords.some(word => body.includes(word));
+        if (hasBadWord) {
+            await sock.sendMessage(myReportNumber, { 
+                text: `🚨 *بلاغ إساءة*\n👤 المستخدم: ${pushName}\n📱 الرقم: ${participant.split('@')[0]}\n💬 الرسالة: "${body}"` 
+            });
         }
 
-        const userPoints = userData.points;
-        const rank = getRankInfo(userPoints);
-        
-        const sendText = async (txt) => {
-            await sock.sendMessage(remoteJid, { text: txt });
-        };
-
-        const myNumber = '201515477230@s.whatsapp.net';
-
-        // --- أمر تحديث السجلات ---
-        if (body === 'تحديث') {
-            userData.joinedGroups = [];
-            userData.lastGroupRequested = null;
-            await userData.save();
-            await sendText("✅ تم تحديث سجلاتك بنجاح! يمكنك الآن اختيار جروبات جديدة من الواجهة الرئيسية.");
-            return;
-        }
-
-        // --- أمر الإدارة ---
-        if (remoteJid === myNumber && body.startsWith('!add')) {
+        // --- أوامر الإدارة (من رقمك فقط) ---
+        if (participant === myAdminNumber) {
             const args = body.split(' ');
-            const pts = parseInt(args[1]);
-            const target = m.message.extendedTextMessage?.contextInfo?.mentionedJid?.[0];
-            if (target && !isNaN(pts)) {
-                await User.findOneAndUpdate({ id: target }, { $inc: { points: pts } }, { upsert: true });
-                await sendText(`✅ تم إضافة ${pts} نقطة بنجاح.`);
-                return;
+            const command = args[0];
+            const amount = parseInt(args[1]);
+            const target = args[2];
+
+            if (command === '!add' && target) {
+                const jid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
+                await User.findOneAndUpdate({ id: jid }, { $inc: { points: amount } }, { upsert: true });
+                return sock.sendMessage(remoteJid, { text: `✅ تم إضافة ${amount} نقطة للرقم ${target}` });
+            }
+            if (command === '!sub' && target) {
+                const jid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
+                const u = await User.findOne({ id: jid });
+                if (u) { u.points = Math.max(0, u.points - amount); await u.save(); }
+                return sock.sendMessage(remoteJid, { text: `📉 تم خصم ${amount} نقطة من الرقم ${target}` });
+            }
+            if (command === '!addall') {
+                await User.updateMany({}, { $inc: { points: amount } });
+                return sock.sendMessage(remoteJid, { text: `🌟 تم زيادة ${amount} نقطة للكل!` });
+            }
+            if (command === '!suball') {
+                const all = await User.find({});
+                for(let u of all) { u.points = Math.max(0, u.points - amount); await u.save(); }
+                return sock.sendMessage(remoteJid, { text: `📉 تم خصم ${amount} نقطة من الكل!` });
+            }
+            // أمر الحظر
+            if (command === '!ban' && target) {
+                const jid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
+                await User.findOneAndUpdate({ id: jid }, { isBanned: true }, { upsert: true });
+                return sock.sendMessage(remoteJid, { text: `🚫 تم حظر الرقم ${target} نهائياً.` });
+            }
+            if (command === '!unban' && target) {
+                const jid = target.includes('@') ? target : `${target}@s.whatsapp.net`;
+                await User.findOneAndUpdate({ id: jid }, { isBanned: false });
+                return sock.sendMessage(remoteJid, { text: `✅ تم فك الحظر عن ${target}.` });
             }
         }
 
-        // --- نصوص الواجهة الأصلية ---
+        // --- نصوص الرسائل الأصلية بالكامل ---
         const sendMainMenu = async () => {
-            await sendText(`✨ أهلاً بك في صفحتك الرئيسية ✨\n\nإنت دلوقتي في مكان معمول مخصوص لناس بتحب المحتوى التقيل 💪\n\n📌 اختار المجال اللي مهتم بيه واكتب رقمه:\n1️⃣ البرمجة والتقنية\n(برمجة – أمن معلومات – اختراق أخلاقي – ذكاء اصطناعي – أدوات تقنية)\n\n2️⃣ التصميم والمونتاج\n(جرافيك – مونتاج – موشن جرافيك – تصوير)\n\n3️⃣ التسويق وصناعة البيزنس\n(تسويق إلكتروني – سوشيال ميديا – تجارة إلكترونية – عمل حر)\n\n4️⃣ صناعة المحتوى والإعلام\n(يوتيوب – تيك توك – كتابة محتوى – بودكاست)\n\n5️⃣ الألعاب والأنمي\n(جيمينج – أخبار الألعاب – أنمي ومانجا – نقاشات وترشيحات)\n\n6️⃣ الربح والاستثمار\n(ربح من الإنترنت – تداول – استثمار – مشاريع جانبية)\n\n7️⃣ التطوير الذاتي والمهارات\n(إدارة وقت – تنظيم – مهارات شخصية – تعلم ذاتي)\n\n8️⃣ دردشة عامة واهتمامات متنوعة\n(نقاشات خفيفة – آراء – مواضيع عامة)\n\n🔄 إذا خرجت من جروباتك وتريد اختيار غيرها اكتب: تحديث\n✍️ اكتب رقم المجال... لأن اللي جاي تقيل 🔥😉`);
+            await sock.sendMessage(remoteJid, { text: `✨ أهلاً بك في صفحتك الرئيسية ✨\n\nإنت دلوقتي في مكان معمول مخصوص لناس بتحب المحتوى التقيل 💪\n\n📌 اختار المجال اللي مهتم بيه واكتب رقمه:\n1️⃣ البرمجة والتقنية\n(برمجة – أمن معلومات – اختراق أخلاقي – ذكاء اصطناعي – أدوات تقنية)\n\n2️⃣ التصميم والمونتاج\n(جرافيك – مونتاج – موشن جرافيك – تصوير)\n\n3️⃣ التسويق وصناعة البيزنس\n(تسويق إلكتروني – سوشيال ميديا – تجارة إلكترونية – عمل حر)\n\n4️⃣ صناعة المحتوى والإعلام\n(يوتيوب – تيك توك – كتابة محتوى – بودكاست)\n\n5️⃣ الألعاب والأنمي\n(جيمينج – أخبار الألعاب – أنمي ومانجا – نقاشات وترشيحات)\n\n6️⃣ الربح والاستثمار\n(ربح من الإنترنت – تداول – استثمار – مشاريع جانبية)\n\n7️⃣ التطوير الذاتي والمهارات\n(إدارة وقت – تنظيم – مهارات شخصية – تعلم ذاتي)\n\n8️⃣ دردشة عامة واهتمامات متنوعة\n(نقاشات خفيفة – آراء – مواضيع عامة)\n\n🔄 إذا خرجت من جروباتك وتريد اختيار غيرها اكتب: تحديث\n✍️ اكتب رقم المجال... لأن اللي جاي تقيل 🔥😉` });
         };
 
+        const rank = getRankInfo(userData.points);
         const num = parseInt(body);
 
         if (['16', 'ابدأ', 'هلا', '.'].includes(body) || !userData.greeted) {
-            userData.greeted = true;
-            await userData.save();
+            userData.greeted = true; await userData.save();
             await sendMainMenu();
         } 
         else if (num >= 1 && num <= 8) {
-            const groupId = body;
-            const selection = groupInfo[groupId];
-
-            if (userData.joinedGroups.includes(groupId)) {
-                userData.lastGroupRequested = selection.link;
-                await userData.save();
-                await sendText(`🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀`);
-            } 
-            else if (userData.joinedGroups.length >= 2) {
-                await sendText(`⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[userData.joinedGroups[0]].name}\n2️⃣ ${groupInfo[userData.joinedGroups[1]].name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪`);
-            } 
-            else {
-                userData.joinedGroups.push(groupId);
-                userData.lastGroupRequested = selection.link;
-                await userData.save();
-                await sendText(`🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀`);
+            if (userData.joinedGroups.length >= 2 && !userData.joinedGroups.includes(body)) {
+                await sock.sendMessage(remoteJid, { text: `⚠️ عفواً! لا يمكنك الانضمام لأكثر من جروبين في نفس الوقت.\n\nأنت مشترك حالياً في:\n1️⃣ ${groupInfo[userData.joinedGroups[0]]?.name}\n2️⃣ ${groupInfo[userData.joinedGroups[1]]?.name}\n\nيجب عليك الخروج من أحدهما أولاً ثم كتابة كلمة *تحديث* لتتمكن من الانضمام لمجال جديد. 🚪` });
+            } else {
+                if (!userData.joinedGroups.includes(body)) userData.joinedGroups.push(body);
+                const selection = groupInfo[body];
+                userData.lastGroupRequested = selection.link; await userData.save();
                 
-                setTimeout(async () => {
-                    await sendText(`اختيار ممتاز🔥 الجروب ده مش دردشة فاضية...\n\n📩 اختار اللي حابب تعرفه واكتب رقمه:\n9️⃣ عرض نقاطي\n🔟 عرض رتبتي الحالية\n1️⃣1️⃣ معلومات الجروب\n2️⃣1️⃣ قوانين الجروب\n3️⃣1️⃣ فائدة الجروب\n4️⃣1️⃣ كيف تشارك صح\n5️⃣1️⃣ تواصل مع الإدارة\n6️⃣1️⃣ الواجهة الرئيسية\n✍️ اكتب الرقم وسيب الباقي علينا 😉🔥`);
-                }, 2000);
+                await sock.sendMessage(remoteJid, { text: `🔗 إليك رابط الانضمام لجروب [DB-Lenrah لـ ${selection.name}]:\n${selection.link}\n\nننتظرك هناك! 🚀` });
+                await sock.sendMessage(remoteJid, { text: `اختيار ممتاز🔥 الجروب ده مش دردشة فاضية...\n\n📩 اختار اللي حابب تعرفه واكتب رقمه:\n9️⃣ عرض نقاطي\n🔟 عرض رتبتي الحالية\n1️⃣1️⃣ معلومات الجروب\n2️⃣1️⃣ قوانين الجروب\n3️⃣1️⃣ فائدة الجروب\n4️⃣1️⃣ كيف تشارك صح\n5️⃣1️⃣ تواصل مع الإدارة\n6️⃣1️⃣ الواجهة الرئيسية\n✍️ اكتب الرقم وسيب الباقي علينا 😉🔥` });
             }
         } 
         else if (body === '9') {
-            await sendText(`1️⃣ عرض نقاطي\n🎮 حسابك داخل الجروب\n⭐ نقاطك الحالية: [ ${userPoints} ] نقطة\n\n🏆 رتبتك الحالية: [ ${rank.name} ]\nكمّل تفاعل 🔥💪`);
+            await sock.sendMessage(remoteJid, { text: `1️⃣ عرض نقاطي\n🎮 حسابك داخل الجروب\n⭐ نقاطك الحالية: [ ${userData.points} ] نقطة\n\n🏆 رتبتك الحالية: [ ${rank.name} ]\nكمّل تفاعل 🔥💪` });
         } 
         else if (body === '10') {
-            await sendText(`2️⃣ عرض رتبتي الحالية\n🏅 رتبتك داخل الجروب: [ ${rank.name} ]\n📊 التقدم للرتبة التالية:\n\nنقاطك: [ ${userPoints} ] / [ ${rank.req} ]\nكل خطوة تقربك من القمة 👑🚀`);
-        } 
-        else if (body === '11') {
-            await sendText(`3️⃣ معلومات الجروب والنظام\n📌 معلومات الجروب\nده جروب مجتمعي بيجمع بين:\n✔️ التقنية ✔️ المحتوى ✔️ النقاش ✔️ الترفيه\n\n🔹 نظام الجروب بيعتمد على النقاط والرتب\nالجروب معمول عشان اللي بيدي ياخد 👌`);
-        } 
-        else if (body === '12') {
-            await sendText(`4️⃣ قوانين الجروب\n⚠️ قوانين بسيطة بس مهمة:\n✔️ الاحترام المتبادل\n✔️ الالتزام بالموضوع\n✔️ ممنوع السبام\nالنظام واضح وعادل ⚖️`);
-        } 
-        else if (body === '13') {
-            await sendText(`5️⃣ مجال الجروب وإيه اللي ممكن تستفيده\n🎯 مجالات الجروب:\nتقنية، تصميم، تسويق، ألعاب، تطوير ذات.\n\nهنا وجودك مش رقم… وجودك قيمة ✨`);
-        } 
-        else if (body === '14') {
-            await sendText(`6️⃣ ازاي تتفاعل وتشارك صح\n🚀 عايز تعلى بسرعة؟\n✔️ شارك بمعلومة مفيدة ✔️ اسأل سؤال ذكي ✔️ ساعد غيرك\nاللعب النضيف هو اللي يكسب 🕹️🔥`);
-        } 
-        else if (body === '15') {
-            await sendText(`7️⃣ تواصل مع الإدارة\n👨‍💼 تواصل مع الإدارة\n📩 ابعت رسالة خاصة للأدمن:\n👉 [+201515477230]\nإحنا هنا نساعدك 🤝`);
-        } 
+            await sock.sendMessage(remoteJid, { text: `2️⃣ عرض رتبتي الحالية\n🏅 رتبتك داخل الجروب: [ ${rank.name} ]\n📊 التقدم للرتبة التالية:\n\nنقاطك: [ ${userData.points} ] / [ ${rank.req} ]\nكل خطوة تقربك من القمة 👑🚀` });
+        }
+        else if (body === '11') { await sock.sendMessage(remoteJid, { text: `3️⃣ معلومات الجروب والنظام\n📌 معلومات الجروب\nده جروب مجتمعي بيجمع بين:\n✔️ التقنية ✔️ المحتوى ✔️ النقاش ✔️ الترفيه\n\n🔹 نظام الجروب بيعتمد على النقاط والرتب\nالجروب معمول عشان اللي بيدي ياخد 👌` }); }
+        else if (body === '12') { await sock.sendMessage(remoteJid, { text: `4️⃣ قوانين الجروب\n⚠️ قوانين بسيطة بس مهمة:\n✔️ الاحترام المتبادل\n✔️ الالتزام بالموضوع\n✔️ ممنوع السبام\nالنظام واضح وعادل ⚖️` }); }
+        else if (body === '13') { await sock.sendMessage(remoteJid, { text: `5️⃣ مجال الجروب وإيه اللي ممكن تستفيده\n🎯 مجالات الجروب:\nتقنية، تصميم، تسويق، ألعاب، تطوير ذات.\n\nهنا وجودك مش رقم… وجودك قيمة ✨` }); }
+        else if (body === '14') { await sock.sendMessage(remoteJid, { text: `6️⃣ ازاي تتفاعل وتشارك صح\n🚀 عايز تعلى بسرعة؟\n✔️ شارك بمعلومة مفيدة ✔️ اسأل سؤال ذكي ✔️ ساعد غيرك\nاللعب النضيف هو اللي يكسب 🕹️🔥` }); }
+        else if (body === '15') { await sock.sendMessage(remoteJid, { text: `7️⃣ تواصل مع الإدارة\n👨‍💼 تواصل مع الإدارة\n📩 ابعت رسالة خاصة للأدمن:\n👉 [+201515477230]\nإحنا هنا نساعدك 🤝` }); }
+        else if (body === 'تحديث') {
+            userData.joinedGroups = []; userData.lastGroupRequested = null; await userData.save();
+            await sock.sendMessage(remoteJid, { text: "✅ تم تحديث سجلاتك بنجاح! يمكنك الآن اختيار جروبات جديدة." });
+        }
         else {
-            await sendMainMenu();
+            if (body.toLowerCase().includes("مين")) {
+                await sock.sendMessage(remoteJid, { text: "أنا بوت DB-Lenrah، بساعدك تطور مهاراتك وتدخل مجتمعاتنا. اكتب 'ابدأ' للبدء." });
+            } else { await sendMainMenu(); }
         }
     });
-}
 
+    sock.ev.on('connection.update', (u) => { if (u.connection === 'close') startBot(); });
+}
 startBot();
