@@ -12,9 +12,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "mongoose": "^9.1.5",
-    "pino": "^10.3.0",
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.21",
+    "axios": "^1.13.4",
+    "mongoose": "^8.22.0",
+    "pino": "^8.21.0",
     "qrcode-terminal": "^0.12.0"
   }
 }
