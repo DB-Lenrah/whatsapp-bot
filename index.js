@@ -80,12 +80,11 @@ async function chatGPT(text) {
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('baileys_auth');
     
-    // إعدادات محسنة لتقليل الرسائل الصفراء وتوضيح الـ QR
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true, 
-        logger: pino({ level: 'error' }), // يظهر الأخطاء فقط ليبقى الـ Terminal نظيفاً
-        browser: ['DB-Lenrah AI', 'Chrome', '3.0.0'],
+        printQRInTerminal: false, // هدوء تام
+        logger: pino({ level: 'silent' }),
+        browser: ['DB-Lenrah', 'Chrome', '1.0.0'],
         syncFullHistory: false
     });
 
@@ -226,21 +225,27 @@ async function startBot() {
     // --- نظام الاتصال وتنظيف الـ QR ---
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
+        
+        // عرض الـ QR يدوياً فقط عند الحاجة
         if (qr) {
-            console.clear(); // تنظيف الشاشة قبل عرض الـ QR
-            console.log("-----------------------------------------");
-            console.log("📸 امسح الكود التالي لتشغيل البوت:");
+            console.log('--------------------------------------------------');
+            console.log('📩 كود الـ QR جاهز للمسح الآن:');
             qrcode.generate(qr, { small: true });
-            console.log("-----------------------------------------");
+            console.log('--------------------------------------------------');
         }
+
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                console.log('🔄 جاري محاولة إعادة الاتصال خلال 5 ثواني...');
-                setTimeout(() => startBot(), 5000);
+            const statusCode = (lastDisconnect.error instanceof Boom)?.output?.statusCode;
+            
+            // إذا كان سبب الإغلاق هو تسجيل الخروج، لا تحاول إعادة الاتصال (يمنع الـ Loop)
+            if (statusCode !== DisconnectReason.loggedOut) {
+                console.log('🔄 جاري محاولة إعادة الاتصال...');
+                setTimeout(() => startBot(), 10000); // زيادة المهلة لـ 10 ثواني لاستقرار السيرفر
+            } else {
+                console.log('🚫 تم تسجيل الخروج. يرجى مسح الـ QR من جديد.');
             }
         } else if (connection === 'open') {
-            console.log('✅ [SYSTEM] البوت والذكاء الاصطناعي قيد التشغيل الآن!');
+            console.log('✅ [SUCCESS] تم تشغيل البوت بنجاح وهو الآن متاح للخدمة!');
         }
     });
 }
