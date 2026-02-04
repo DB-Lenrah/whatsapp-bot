@@ -94,10 +94,13 @@ async function startBot() {
     const sock = makeWASocket({
         version,
         auth: state,
-        printQRInTerminal: false, // سنطبع الكود يدوياً لضمان ظهوره ومنع المشاكل
+        printQRInTerminal: false, 
         logger: pino({ level: 'silent' }), 
         browser: ['DB-Lenrah', 'Chrome', '1.0.0'],
-        syncFullHistory: false
+        syncFullHistory: false, // تأكد من وجود الفاصلة هنا
+        connectTimeoutMs: 60000, 
+        defaultQueryTimeoutMs: 0, 
+        keepAliveIntervalMs: 10000 // هنا لا نحتاج فاصلة لأنها آخر سطر
     });
 
     sock.ev.on('creds.update', saveCreds);
